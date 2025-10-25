@@ -1,0 +1,56 @@
+#include <SoftwareSerial.h>
+
+// === Ligações (Arduino UNO/Nano) ===
+// SIM900 TX -> D10 (RX do Arduino para o módulo)
+// SIM900 RX -> D11 (TX do Arduino para o módulo)  << use divisor de tensão (ex.: 10k/20k)
+// GND do SIM900 e do Arduino em comum
+SoftwareSerial gprs(10, 11);  // RX, TX
+
+// Ajuste estas velocidades se precisar testar outros bauds
+unsigned long PC_BAUD   = 9600;  // Serial Monitor
+unsigned long GPRS_BAUD = 9600;  // SIM900 (alguns vêm em 115200)
+
+void setup() {
+  Serial.begin(PC_BAUD);
+  while (!Serial) { ; }
+  gprs.begin(GPRS_BAUD);
+
+  Serial.println(F("\n=== Bridge AT SIM900 ==="));
+  Serial.println(F("Dica: no Serial Monitor, selecione 'Both NL & CR'."));
+  Serial.println(F("Envie AT e aguarde OK. Para terminar SMS, digite ~Z (vira Ctrl+Z)."));
+  Serial.println(F("Se vier lixo/tremido, mude GPRS_BAUD para 115200 e reenvie."));
+}
+
+void loop() {
+  // Módulo -> PC
+  while (gprs.available()) {
+    char c = gprs.read();
+    Serial.write(c);
+  }
+
+  // PC -> Módulo (com atalho ~Z para Ctrl+Z)
+  static bool tilde = false;
+  while (Serial.available()) {
+    char c = Serial.read();
+
+    if (tilde) {
+      tilde = false;
+      if (c == 'Z' || c == 'z') {
+        gprs.write((char)26);     // CTRL+Z
+        Serial.println(F("\n[CTRL+Z enviado]"));
+      } else if (c == '~') {
+        gprs.write('~');          // envia tilde literal
+      } else {
+        // caractere apos ~ nao reconhecido: ignora ou envie normal
+        gprs.write(c);
+      }
+      continue;
+    }
+
+    if (c == '~') {
+      tilde = true;               // próximo caractere é comando especial
+    } else {
+      gprs.write(c);              // passa direto
+    }
+  }
+}

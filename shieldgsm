@@ -1,0 +1,164 @@
+#include <SoftwareSerial.h>
+
+// === PINOS ===
+const int ledPin    = 13;   // LED
+const int sensorPin = 12;   // HW-870 (NPN, saída open-collector)
+const int BUZZER    = 7;    // Buzzer
+
+// === MÓDULO GPRS (SIM900) ===
+// gprs(RX, TX) -> RX do Arduino (10) recebe do TX do SIM; TX do Arduino (11) vai ao RX do SIM
+SoftwareSerial gprs(10, 11);
+String numeroCelular = "+55XXXXXXXXXXX"; // DDI+DDD+número
+bool estadoSensor = false;
+bool smsEnviado   = false;
+
+bool waitFor(const char* token, unsigned long timeoutMs) {
+  unsigned long t0 = millis();
+  String buf;
+  while (millis() - t0 < timeoutMs) {
+    while (gprs.available()) {
+      char c = gprs.read();
+      buf += c;
+      // Opcional: eco para debug
+      Serial.write(c);
+      if (buf.indexOf(token) >= 0) return true;
+    }
+  }
+  return false;
+}
+
+bool sendAT(const String& cmd, const char* expect, unsigned long timeoutMs) {
+  Serial.print(F(">> ")); Serial.println(cmd);
+  gprs.println(cmd);
+  return waitFor(expect, timeoutMs);
+}
+
+bool inicializarGPRS() {
+  Serial.println(F("Inicializando modulo..."));
+
+  // Tentar autobaud simples
+  for (int i = 0; i < 8; i++) {
+    gprs.println(F("AT"));
+    if (waitFor("OK", 800)) break;
+    delay(200);
+  }
+
+  // Silenciar eco (opcional)
+  sendAT(F("ATE0"), "OK", 1000);
+
+  // Checar SIM
+  if (!sendAT(F("AT+CPIN?"), "READY", 2000)) {
+    Serial.println(F("ERRO: SIM sem PIN liberado ou nao detectado."));
+    return false;
+  }
+
+  // Esperar registracao na rede
+  bool registrado = false;
+  for (int i = 0; i < 10 && !registrado; i++) {
+    gprs.println(F("AT+CREG?"));
+    if (waitFor("+CREG: 0,1", 1000) || waitFor("+CREG: 0,5", 1000)) {
+      registrado = true; // 1 = home, 5 = roaming
+      break;
+    }
+    delay(1000);
+  }
+  if (!registrado) {
+    Serial.println(F("ERRO: nao registrou na rede (CREG)."));
+    return false;
+  }
+
+  // Opcional: ver sinal
+  sendAT(F("AT+CSQ"), "OK", 1000); // ideal > 10
+
+  // Modo texto
+  if (!sendAT(F("AT+CMGF=1"), "OK", 1000)) {
+    Serial.println(F("ERRO: nao entrou em modo texto."));
+    return false;
+  }
+  // Conjunto de caracteres padrão
+  sendAT(F("AT+CSCS=\"GSM\""), "OK", 1000);
+
+  Serial.println(F("Modulo pronto para SMS."));
+  return true;
+}
+
+bool enviarSMS(const String& msg) {
+  Serial.println(F("Enviando SMS..."));
+
+  if (!sendAT(F("AT+CMGF=1"), "OK", 1000)) return false;
+
+  // Discar comando CMGS e esperar o prompt '>'
+  gprs.print(F("AT+CMGS=\""));
+  gprs.print(numeroCelular);
+  gprs.println(F("\""));
+  if (!waitFor(">", 10000)) {
+    Serial.println(F("ERRO: prompt '>' nao recebido."));
+    return false;
+  }
+
+  // Texto + Ctrl+Z
+  gprs.print(msg);
+  delay(100);
+  gprs.write(26); // Ctrl+Z
+
+  // Confirmacao do envio
+  if (!waitFor("OK", 60000)) {
+    Serial.println(F("ERRO: envio nao confirmado (+CMGS/OK)."));
+    return false;
+  }
+
+  Serial.println(F("SMS enviado com sucesso!"));
+  return true;
+}
+
+void setup() {
+  Serial.begin(9600);
+  gprs.begin(9600);
+
+  pinMode(ledPin, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(sensorPin, INPUT_PULLUP); // HW-870 NPN -> puxa p/ GND quando detecta
+  digitalWrite(ledPin, LOW);
+  digitalWrite(BUZZER, LOW);
+
+  delay(2000);
+  if (!inicializarGPRS()) {
+    Serial.println(F("Falha na inicializacao do SIM900. Verifique fonte/antena/operadora."));
+  } else {
+    Serial.println(F("SIM900 OK."));
+  }
+}
+
+void loop() {
+  int leitura = digitalRead(sensorPin); // NPN ativo em LOW
+
+  if (leitura == LOW) { // objeto detectado
+    digitalWrite(ledPin, HIGH);
+    digitalWrite(BUZZER, HIGH);
+
+    if (!estadoSensor) {
+      Serial.println(F("Movimento detectado!"));
+      estadoSensor = true;
+
+      if (!smsEnviado) {
+        if (enviarSMS(F("Alerta: Movimento detectado pelo sensor!"))) {
+          smsEnviado = true;
+        } else {
+          // Mantem false para tentar novamente no proximo evento, se quiser
+          Serial.println(F("Tentativa de SMS falhou."));
+        }
+      }
+    }
+  } else {
+    digitalWrite(ledPin, LOW);
+    digitalWrite(BUZZER, LOW);
+
+    if (estadoSensor) {
+      Serial.println(F("Sem movimento."));
+      estadoSensor = false;
+      smsEnviado = false; // permite novo envio no proximo disparo
+    }
+  }
+
+  delay(100);
+}
